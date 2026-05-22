@@ -1,0 +1,30 @@
+{
+  "name": "mail-relay",
+  "private": true,
+  "type": "module",
+  "module": "index.ts",
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "admin": "bun run src/admin.ts"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "4.0.0-beta.70",
+    "@effect/platform-node": "4.0.0-beta.70",
+    "alchemy": "next",
+    "effect": "4.0.0-beta.70"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260522.1",
+    "@types/bun": "latest",
+    "@typescript/native-preview": "^7.0.0-dev.20260521.1",
+    "oxfmt": "^0.51.0",
+    "oxlint": "^1.66.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
