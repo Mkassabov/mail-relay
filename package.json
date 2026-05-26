@@ -9,7 +9,8 @@
     "lint:fix": "oxlint --fix",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "admin": "bun run src/admin.ts"
+    "admin": "bun run src/admin.ts",
+    "build:cli": "source .env && bun build --compile src/admin.ts --outfile mail-relay --define __WORKER_URL__=\"'$WORKER_URL'\" --define __ADMIN_BEARER_TOKEN__=\"'$ADMIN_BEARER_TOKEN'\""
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.0-beta.70",

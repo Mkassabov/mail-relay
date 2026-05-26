@@ -1,16 +1,9 @@
 #!/usr/bin/env bun
 
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const scriptDir = dirname(fileURLToPath(import.meta.url));
-const envFile = Bun.file(join(scriptDir, "..", ".env"));
-if (await envFile.exists()) {
-  for (const line of (await envFile.text()).split("\n")) {
-    const match = line.match(/^([^#=]+)=(.*)$/);
-    if (match) process.env[match[1]!.trim()] = match[2]!.trim();
-  }
-}
+declare const __WORKER_URL__: string;
+declare const __ADMIN_BEARER_TOKEN__: string;
+process.env.WORKER_URL ??= __WORKER_URL__;
+process.env.ADMIN_BEARER_TOKEN ??= __ADMIN_BEARER_TOKEN__;
 
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
