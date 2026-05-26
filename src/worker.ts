@@ -13,9 +13,38 @@ import { AuthMiddleware, MailRelayApi, NotFound, Unauthorized } from "./api.ts";
 import { resolveForwardAddress } from "./config.ts";
 import { DB, Email, HeldEmails } from "./resources.ts";
 
+function extractTextBody(raw: string): string {
+  const headerEnd = raw.indexOf("\r\n\r\n");
+  if (headerEnd === -1) return raw;
+  const headers = raw.slice(0, headerEnd);
+  const body = raw.slice(headerEnd + 4);
+
+  const ctMatch = headers.match(/^Content-Type:\s*(.+)/im);
+  const ct = ctMatch?.[1] ?? "";
+
+  const boundaryMatch = ct.match(/boundary="?([^";\r\n]+)"?/);
+  if (!boundaryMatch) return body.trim();
+
+  const boundary = boundaryMatch[1];
+  const parts = body.split(`--${boundary}`);
+  for (const part of parts) {
+    if (/Content-Type:\s*text\/plain/i.test(part)) {
+      const partBody = part.indexOf("\r\n\r\n");
+      if (partBody !== -1) return part.slice(partBody + 4).trim();
+    }
+  }
+  return body.trim();
+}
+
 export default Cloudflare.Worker(
   "Worker",
-  { main: import.meta.path, domain: process.env.MAIL_RELAY_DOMAIN },
+  {
+    main: import.meta.path,
+    domain: process.env.MAIL_RELAY_DOMAIN,
+    env: {
+      test: "string",
+    },
+  },
   Effect.gen(function* () {
     const db = yield* Cloudflare.D1Connection.bind(DB);
     const bucket = yield* Cloudflare.R2Bucket.bind(HeldEmails);
@@ -63,7 +92,7 @@ export default Cloudflare.Worker(
           db
             .prepare(
               `SELECT id, sender, alias, subject, received_at, status
-                 FROM held_requests ORDER BY received_at DESC`,
+                 FROM held_requests WHERE status = 'pending' ORDER BY received_at DESC`,
             )
             .all<{
               id: string;
@@ -97,23 +126,26 @@ export default Cloudflare.Worker(
               );
             }
 
-            const held = yield* bucket.get(row.r2_key).pipe(Effect.orDie);
-            if (held) {
-              const tmpl = yield* forwardTemplate;
-              const dom = yield* domain;
-              const forwardTo = resolveForwardAddress(tmpl, row.alias);
-              const rawBytes = yield* Effect.orDie(held.arrayBuffer());
+            const tmpl = yield* forwardTemplate;
+            const recipientDomain = (yield* domain).toLowerCase();
+            const forwardTo = resolveForwardAddress(tmpl, row.alias);
 
-              yield* Effect.orDie(
-                email.send({
-                  from: { email: `relay@${dom}`, name: row.sender },
-                  replyTo: row.sender,
-                  to: forwardTo,
-                  subject: row.subject ?? "(no subject)",
-                  text: new TextDecoder().decode(rawBytes),
-                }),
-              );
+            const r2Obj = yield* Effect.orDie(bucket.get(row.r2_key));
+            let body = `(original message body unavailable)`;
+            if (r2Obj) {
+              const raw = yield* Effect.orDie(r2Obj.text());
+              body = extractTextBody(raw);
             }
+
+            yield* Effect.orDie(
+              email.send({
+                from: { name: `MR ${row.sender}`, email: `${row.alias}@${recipientDomain}` },
+                to: forwardTo,
+                subject: row.subject ?? "(no subject)",
+                replyTo: row.sender,
+                text: body,
+              }),
+            );
 
             yield* db.batch([
               db
@@ -122,6 +154,12 @@ export default Cloudflare.Worker(
               db
                 .prepare("UPDATE held_requests SET status = 'approved' WHERE id = ?1")
                 .bind(params.id),
+              db
+                .prepare(
+                  `INSERT INTO email_log (id, sender, alias, recipient, subject, trigger)
+                   VALUES (?1, ?2, ?3, ?4, ?5, 'approve')`,
+                )
+                .bind(crypto.randomUUID(), row.sender, row.alias, forwardTo, row.subject),
             ]);
 
             yield* Effect.orDie(bucket.delete(row.r2_key));
@@ -131,6 +169,23 @@ export default Cloudflare.Worker(
               whitelisted: { sender: row.sender, alias: row.alias },
             };
           }),
+        )
+        .handle("listLog", () =>
+          db
+            .prepare(
+              `SELECT id, sender, alias, recipient, subject, sent_at, trigger
+                 FROM email_log ORDER BY sent_at DESC`,
+            )
+            .all<{
+              id: string;
+              sender: string;
+              alias: string;
+              recipient: string;
+              subject: string | null;
+              sent_at: string;
+              trigger: string;
+            }>()
+            .pipe(Effect.map((r) => r.results ?? [])),
         )
         .handle("rejectRequest", ({ params }) =>
           Effect.gen(function* () {
@@ -187,7 +242,34 @@ export default Cloudflare.Worker(
           if (whitelisted) {
             const tmpl = yield* forwardTemplate;
             const forwardTo = resolveForwardAddress(tmpl, alias);
-            yield* Effect.promise(() => message.forward(forwardTo));
+            const recipientDomain = (yield* domain).toLowerCase();
+
+            const raw = yield* Effect.promise(() => new Response(message.raw).text());
+            const body = extractTextBody(raw);
+
+            const fromHeader = message.headers.get("from") ?? sender;
+            const nameMatch = fromHeader.match(/^"?([^"<]+)"?\s*</);
+            const senderName = nameMatch?.[1]?.trim() ?? sender;
+            const subject = message.headers.get("subject") ?? "(no subject)";
+
+            yield* Effect.orDie(
+              email.send({
+                from: { name: `MR ${senderName} (${sender})`, email: `${alias}@${recipientDomain}` },
+                to: forwardTo,
+                subject,
+                replyTo: sender,
+                text: body,
+              }),
+            );
+
+            yield* db
+              .prepare(
+                `INSERT INTO email_log (id, sender, alias, recipient, subject, trigger)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'forward')`,
+              )
+              .bind(crypto.randomUUID(), sender, alias, forwardTo, subject)
+              .run();
+
             return;
           }
 

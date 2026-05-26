@@ -62,6 +62,20 @@ const listRequests = HttpApiEndpoint.get("listRequests", "/requests", {
   success: Schema.Array(HeldRequest),
 });
 
+export const EmailLogEntry = Schema.Struct({
+  id: Schema.String,
+  sender: Schema.String,
+  alias: Schema.String,
+  recipient: Schema.String,
+  subject: Schema.NullOr(Schema.String),
+  sent_at: Schema.String,
+  trigger: Schema.String,
+});
+
+const listLog = HttpApiEndpoint.get("listLog", "/log", {
+  success: Schema.Array(EmailLogEntry),
+});
+
 const approveRequest = HttpApiEndpoint.post("approveRequest", "/requests/:id/approve", {
   params: { id: Schema.String },
   success: Approved,
@@ -81,6 +95,7 @@ export class AdminGroup extends HttpApiGroup.make("Admin")
   .add(listRequests)
   .add(approveRequest)
   .add(rejectRequest)
+  .add(listLog)
   .middleware(AuthMiddleware) {}
 
 export class MailRelayApi extends HttpApi.make("MailRelayApi").add(AdminGroup) {}

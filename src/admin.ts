@@ -122,6 +122,22 @@ const requests = {
   }),
 };
 
+const log = {
+  list: Effect.gen(function* () {
+    const client = yield* makeClient;
+    const entries = yield* client.Admin.listLog({});
+    if (entries.length === 0) {
+      yield* Clank.info("No emails sent.");
+      return;
+    }
+    for (const e of entries) {
+      yield* Clank.info(
+        `[${e.trigger}] ${e.sender} → ${e.alias} → ${e.recipient}  "${e.subject ?? "(no subject)"}"  (${e.sent_at})`,
+      );
+    }
+  }),
+};
+
 const USAGE = `Usage: bun run admin <command>
 
 Commands:
@@ -131,7 +147,8 @@ Commands:
   requests list                      List all held requests
   requests approve <id>              Approve a held request
   requests reject <id>               Reject a held request
-  requests review                    Interactively review pending requests`;
+  requests review                    Interactively review pending requests
+  log                                List sent email log`;
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -149,6 +166,7 @@ const main = (() => {
     if (sub === "reject" && args[2]) return requests.reject(args[2]);
     if (sub === "review") return requests.review;
   }
+  if (cmd === "log") return log.list;
   console.log(USAGE);
   process.exit(1);
 })();

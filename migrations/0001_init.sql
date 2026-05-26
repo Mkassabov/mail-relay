@@ -17,3 +17,15 @@ CREATE TABLE IF NOT EXISTS held_requests (
 
 CREATE INDEX IF NOT EXISTS idx_held_requests_status ON held_requests(status);
 CREATE INDEX IF NOT EXISTS idx_held_requests_sender_alias ON held_requests(sender, alias);
+
+CREATE TABLE IF NOT EXISTS email_log (
+  id TEXT PRIMARY KEY,
+  sender TEXT NOT NULL COLLATE NOCASE,
+  alias TEXT NOT NULL COLLATE NOCASE,
+  recipient TEXT NOT NULL,
+  subject TEXT,
+  sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+  trigger TEXT NOT NULL DEFAULT 'forward'
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_log_alias ON email_log(alias);
