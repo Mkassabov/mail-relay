@@ -13,9 +13,9 @@ import { AuthMiddleware, MailRelayApi, NotFound, Unauthorized } from "./api.ts";
 import { resolveForwardAddress } from "./config.ts";
 import { DB, Email, HeldEmails } from "./resources.ts";
 
-function extractTextBody(raw: string): string {
+function extractBody(raw: string): { text?: string; html?: string } {
   const headerEnd = raw.indexOf("\r\n\r\n");
-  if (headerEnd === -1) return raw;
+  if (headerEnd === -1) return { text: raw };
   const headers = raw.slice(0, headerEnd);
   const body = raw.slice(headerEnd + 4);
 
@@ -23,17 +23,23 @@ function extractTextBody(raw: string): string {
   const ct = ctMatch?.[1] ?? "";
 
   const boundaryMatch = ct.match(/boundary="?([^";\r\n]+)"?/);
-  if (!boundaryMatch) return body.trim();
+  if (!boundaryMatch) {
+    if (/text\/html/i.test(ct)) return { html: body.trim() };
+    return { text: body.trim() };
+  }
 
   const boundary = boundaryMatch[1];
   const parts = body.split(`--${boundary}`);
+  let text: string | undefined;
+  let html: string | undefined;
   for (const part of parts) {
-    if (/Content-Type:\s*text\/plain/i.test(part)) {
-      const partBody = part.indexOf("\r\n\r\n");
-      if (partBody !== -1) return part.slice(partBody + 4).trim();
-    }
+    const partBody = part.indexOf("\r\n\r\n");
+    if (partBody === -1) continue;
+    const content = part.slice(partBody + 4).trim();
+    if (!text && /Content-Type:\s*text\/plain/i.test(part)) text = content;
+    if (!html && /Content-Type:\s*text\/html/i.test(part)) html = content;
   }
-  return body.trim();
+  return { text, html: html ?? (text ? undefined : body.trim()) };
 }
 
 export default Cloudflare.Worker(
@@ -131,11 +137,9 @@ export default Cloudflare.Worker(
             const forwardTo = resolveForwardAddress(tmpl, row.alias);
 
             const r2Obj = yield* Effect.orDie(bucket.get(row.r2_key));
-            let body = `(original message body unavailable)`;
-            if (r2Obj) {
-              const raw = yield* Effect.orDie(r2Obj.text());
-              body = extractTextBody(raw);
-            }
+            const body = r2Obj
+              ? extractBody(yield* Effect.orDie(r2Obj.text()))
+              : { text: "(original message body unavailable)" };
 
             yield* Effect.orDie(
               email.send({
@@ -143,7 +147,7 @@ export default Cloudflare.Worker(
                 to: forwardTo,
                 subject: row.subject ?? "(no subject)",
                 replyTo: row.sender,
-                text: body,
+                ...body,
               }),
             );
 
@@ -245,7 +249,7 @@ export default Cloudflare.Worker(
             const recipientDomain = (yield* domain).toLowerCase();
 
             const raw = yield* Effect.promise(() => new Response(message.raw).text());
-            const body = extractTextBody(raw);
+            const body = extractBody(raw);
 
             const fromHeader = message.headers.get("from") ?? sender;
             const nameMatch = fromHeader.match(/^"?([^"<]+)"?\s*</);
@@ -258,7 +262,7 @@ export default Cloudflare.Worker(
                 to: forwardTo,
                 subject,
                 replyTo: sender,
-                text: body,
+                ...body,
               }),
             );
 
