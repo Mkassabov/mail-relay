@@ -8,6 +8,7 @@
     "lint:fix": "oxlint --fix",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
+    "test": "node --test src/*.test.ts",
     "admin": "node --env-file=.env src/admin.ts",
     "build:cli": "node --env-file=.env scripts/build-cli.mjs"
   },

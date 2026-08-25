@@ -12,6 +12,14 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { AuthMiddleware, MailRelayApi, NotFound, Unauthorized } from "./api.ts";
 import { resolveForwardAddress } from "./config.ts";
+import {
+  decodeWords,
+  headerValue,
+  parseAddress,
+  parseMessage,
+  sanitizeHeaderText,
+  toForwardPayload,
+} from "./mime.ts";
 import { DB, Email, HeldEmails } from "./resources.ts";
 
 const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
@@ -24,33 +32,19 @@ const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
   fileWebResponse: () => Effect.die("HttpPlatform.fileWebResponse not supported"),
 });
 
-function extractBody(raw: string): { text?: string; html?: string } {
-  const headerEnd = raw.indexOf("\r\n\r\n");
-  if (headerEnd === -1) return { text: raw };
-  const headers = raw.slice(0, headerEnd);
-  const body = raw.slice(headerEnd + 4);
+/** Decode the sender's Subject for re-sending; never leave it empty. */
+function forwardSubject(raw: string | null | undefined): string {
+  return sanitizeHeaderText(decodeWords(raw ?? "")) || "(no subject)";
+}
 
-  const ctMatch = headers.match(/^Content-Type:\s*(.+)/im);
-  const ct = ctMatch?.[1] ?? "";
-
-  const boundaryMatch = ct.match(/boundary="?([^";\r\n]+)"?/);
-  if (!boundaryMatch) {
-    if (/text\/html/i.test(ct)) return { html: body.trim() };
-    return { text: body.trim() };
-  }
-
-  const boundary = boundaryMatch[1];
-  const parts = body.split(`--${boundary}`);
-  let text: string | undefined;
-  let html: string | undefined;
-  for (const part of parts) {
-    const partBody = part.indexOf("\r\n\r\n");
-    if (partBody === -1) continue;
-    const content = part.slice(partBody + 4).trim();
-    if (!text && /Content-Type:\s*text\/plain/i.test(part)) text = content;
-    if (!html && /Content-Type:\s*text\/html/i.test(part)) html = content;
-  }
-  return { text, html: html ?? (text ? undefined : body.trim()) };
+/**
+ * Label the relayed message with the original sender. The display name comes
+ * from the sender's own `From:` header, so it has to be decoded and stripped of
+ * anything that could break out of the header line.
+ */
+function senderLabel(from: string, name?: string): string {
+  const display = sanitizeHeaderText(name ?? "");
+  return display && display.toLowerCase() !== from ? `MR ${display} (${from})` : `MR ${from}`;
 }
 
 export default Cloudflare.Worker(
@@ -138,17 +132,26 @@ export default Cloudflare.Worker(
             const forwardTo = resolveForwardAddress(forwardTemplate, row.alias);
 
             const r2Obj = yield* bucket.get(row.r2_key).pipe(Effect.orDie);
-            const body = r2Obj
-              ? extractBody(yield* r2Obj.text().pipe(Effect.orDie))
+            const held = r2Obj
+              ? parseMessage(yield* r2Obj.arrayBuffer().pipe(Effect.orDie))
+              : undefined;
+            const payload = held
+              ? toForwardPayload(held)
               : { text: "(original message body unavailable)" };
+            const originalFrom = held
+              ? parseAddress(headerValue(held.headers, "from") ?? row.sender)
+              : {};
 
             yield* email
               .send({
-                from: { name: `MR ${row.sender}`, email: `${row.alias}@${recipientDomain}` },
+                from: {
+                  name: senderLabel(row.sender, originalFrom.name),
+                  email: `${row.alias}@${recipientDomain}`,
+                },
                 to: forwardTo,
-                subject: row.subject ?? "(no subject)",
+                subject: forwardSubject(row.subject),
                 replyTo: row.sender,
-                ...body,
+                ...payload,
               })
               .pipe(Effect.orDie);
 
@@ -246,24 +249,25 @@ export default Cloudflare.Worker(
           if (whitelisted) {
             const forwardTo = resolveForwardAddress(forwardTemplate, alias);
 
-            const raw = yield* Effect.promise(() => new Response(message.raw).text());
-            const body = extractBody(raw);
+            // Read the message as bytes, not text: charset and transfer
+            // encodings are per-part, so decoding up front corrupts anything
+            // that isn't plain UTF-8.
+            const raw = yield* Effect.promise(() => new Response(message.raw).arrayBuffer());
+            const parsed = parseMessage(raw);
 
-            const fromHeader = message.headers.get("from") ?? sender;
-            const nameMatch = fromHeader.match(/^"?([^"<]+)"?\s*</);
-            const senderName = nameMatch?.[1]?.trim() ?? sender;
-            const subject = message.headers.get("subject") ?? "(no subject)";
+            const originalFrom = parseAddress(message.headers.get("from") ?? sender);
+            const subject = forwardSubject(message.headers.get("subject"));
 
             yield* email
               .send({
                 from: {
-                  name: `MR ${senderName} (${sender})`,
+                  name: senderLabel(sender, originalFrom.name),
                   email: `${alias}@${recipientDomain}`,
                 },
                 to: forwardTo,
                 subject,
                 replyTo: sender,
-                ...body,
+                ...toForwardPayload(parsed),
               })
               .pipe(Effect.orDie);
 
@@ -280,7 +284,7 @@ export default Cloudflare.Worker(
 
           const id = crypto.randomUUID();
           const r2Key = `held/${id}.eml`;
-          const subject = message.headers.get("subject") ?? "(no subject)";
+          const subject = forwardSubject(message.headers.get("subject"));
 
           const raw = yield* Effect.promise(() => new Response(message.raw).arrayBuffer());
           yield* bucket.put(r2Key, raw).pipe(Effect.orDie);
