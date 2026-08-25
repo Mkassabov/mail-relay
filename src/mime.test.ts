@@ -5,6 +5,7 @@ import {
   parseAddress,
   parseMessage,
   sanitizeHeaderText,
+  threadingHeaders,
   toForwardPayload,
 } from "./mime.ts";
 
@@ -280,4 +281,67 @@ test("drops oversized attachments and says so in the body", () => {
   assert.equal(payload.attachments?.length, 1);
   assert.match(payload.text!, /huge\.bin/);
   assert.match(payload.html!, /<p>\[1 attachment\(s\) omitted[^<]*huge\.bin\]<\/p><\/body>/);
+});
+
+const headersOf = (raw: string[]) => parseMessage(crlf(...raw, "", "body", "")).headers;
+
+test("carries the sender's thread and appends the message's own id", () => {
+  const headers = headersOf([
+    "Message-ID: <c@example.com>",
+    "In-Reply-To: <b@example.com>",
+    "References: <a@example.com> <b@example.com>",
+  ]);
+  assert.deepEqual(threadingHeaders(headers), {
+    "In-Reply-To": "<b@example.com>",
+    References: "<a@example.com> <b@example.com> <c@example.com>",
+  });
+});
+
+test("starts a References chain from In-Reply-To when the sender omitted one", () => {
+  const headers = headersOf(["Message-ID: <b@example.com>", "In-Reply-To: <a@example.com>"]);
+  assert.deepEqual(threadingHeaders(headers), {
+    "In-Reply-To": "<a@example.com>",
+    References: "<a@example.com> <b@example.com>",
+  });
+});
+
+test("seeds a new thread with the message's own id", () => {
+  assert.deepEqual(threadingHeaders(headersOf(["Message-ID: <only@example.com>"])), {
+    References: "<only@example.com>",
+  });
+});
+
+test("omits threading headers when there is nothing to thread against", () => {
+  assert.equal(threadingHeaders(headersOf(["Subject: hi"])), undefined);
+});
+
+test("refuses to relay anything that could inject a header", () => {
+  const headers = new Map([
+    ["message-id", ["<ok@example.com>"]],
+    ["references", ['<a@example.com> not-an-id "\r\nBcc: evil@example.com" <b@example.com>']],
+  ]);
+  assert.deepEqual(threadingHeaders(headers), {
+    References: "<a@example.com> <b@example.com> <ok@example.com>",
+  });
+});
+
+test("trims a long chain but keeps the thread root and the recent tail", () => {
+  const chain = Array.from({ length: 40 }, (_, i) => `<m${i}@example.com>`);
+  const headers = new Map([
+    ["references", [chain.join(" ")]],
+    ["message-id", ["<newest@example.com>"]],
+  ]);
+  const references = threadingHeaders(headers)!["References"]!.split(" ");
+  assert.equal(references.length, 20);
+  assert.equal(references[0], "<m0@example.com>");
+  assert.equal(references.at(-1), "<newest@example.com>");
+  assert.equal(references.at(-2), "<m39@example.com>");
+});
+
+test("does not repeat an id already present in the chain", () => {
+  const headers = new Map([
+    ["references", ["<a@example.com> <b@example.com>"]],
+    ["message-id", ["<b@example.com>"]],
+  ]);
+  assert.equal(threadingHeaders(headers)!["References"], "<a@example.com> <b@example.com>");
 });

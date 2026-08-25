@@ -464,6 +464,49 @@ export function parseAddress(raw: string): { name?: string; email?: string } {
   return { email: first || undefined };
 }
 
+/**
+ * How many message-ids to carry in `References` before trimming. RFC 5322
+ * lets a chain grow without bound; MUAs keep the oldest (the thread root) and
+ * the most recent ones, which is what threading actually keys off.
+ */
+const MAX_REFERENCES = 20;
+
+/**
+ * Pull message-ids out of a header value. The pattern doubles as the
+ * sanitizer: an id cannot contain whitespace or angle brackets, so anything a
+ * sender tries to smuggle in — a folded line, an injected header — is simply
+ * not matched.
+ */
+function messageIds(raw: string | undefined): string[] {
+  return raw?.match(/<[^<>\s]+>/g) ?? [];
+}
+
+/**
+ * Build the threading headers for the relayed copy of a message.
+ *
+ * The relay re-sends rather than bounces, so the recipient's mailbox only ever
+ * holds our copies and has never seen the sender's Message-IDs. Copying
+ * `References` verbatim is therefore not enough on its own — we also append
+ * the original's own Message-ID. That id is what ties the chain together:
+ * when the recipient replies, their client carries it forward, so the sender's
+ * client threads the reply against the message it actually sent, and our next
+ * relayed copy shares a reference with the one before it.
+ */
+export function threadingHeaders(headers: MimeHeaders): Record<string, string> | undefined {
+  const parent = messageIds(headerValue(headers, "in-reply-to"))[0];
+  const references = messageIds(headerValue(headers, "references"));
+  const chain = references.length > 0 ? references : parent ? [parent] : [];
+  const self = messageIds(headerValue(headers, "message-id"))[0];
+  const unique = [...new Set(self ? [...chain, self] : chain)];
+  const trimmed =
+    unique.length > MAX_REFERENCES ? [unique[0]!, ...unique.slice(1 - MAX_REFERENCES)] : unique;
+
+  const out: Record<string, string> = {};
+  if (parent) out["In-Reply-To"] = parent;
+  if (trimmed.length > 0) out["References"] = trimmed.join(" ");
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function escapeHtml(input: string): string {
   return input.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

@@ -18,6 +18,7 @@ import {
   parseAddress,
   parseMessage,
   sanitizeHeaderText,
+  threadingHeaders,
   toForwardPayload,
 } from "./mime.ts";
 import { DB, Email, HeldEmails } from "./resources.ts";
@@ -151,6 +152,7 @@ export default Cloudflare.Worker(
                 to: forwardTo,
                 subject: forwardSubject(row.subject),
                 replyTo: row.sender,
+                ...(held ? { headers: threadingHeaders(held.headers) } : {}),
                 ...payload,
               })
               .pipe(Effect.orDie);
@@ -267,6 +269,9 @@ export default Cloudflare.Worker(
                 to: forwardTo,
                 subject,
                 replyTo: sender,
+                // Carry the sender's thread over, so a relayed conversation
+                // stays one conversation on both ends.
+                headers: threadingHeaders(parsed.headers),
                 ...toForwardPayload(parsed),
               })
               .pipe(Effect.orDie);

@@ -13,6 +13,12 @@ Whitelists are **per sender per alias**. Approval for `foo@<domain>` does not gr
 
 Outbound mail uses Cloudflare’s `send_email` binding. `Reply-To` is the original sender.
 
+The relay re-sends rather than bounces, so it rebuilds the message: MIME parts are decoded and
+re-encoded (text, HTML, inline images and attachments are all preserved), and `In-Reply-To` /
+`References` are carried over with the original’s `Message-ID` appended, so a relayed exchange
+stays one thread in both mailboxes. Attachments over 12 MB in total are dropped, with a note in
+the body naming them.
+
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) 22+
