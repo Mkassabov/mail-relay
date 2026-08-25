@@ -41,27 +41,43 @@ Alchemy is a project dependency. You do not need a global install.
 ### Cloudflare credentials: API token, not OAuth
 
 **`alchemy login`'s OAuth flow cannot deploy this project.** Cloudflare publishes no
-Email Routing OAuth scope, so an OAuth credential gets `Forbidden: Authentication error`
-on every `/email/routing` call — including plain reads. Use an **API token** (or the
-Global API Key).
+Email Routing OAuth scope, so an OAuth credential gets `Unauthorized`/`Forbidden:
+Authentication error` on every `/email/routing` call — including plain reads. That
+failure surfaces immediately, before any resource is touched, so a deploy that dies
+at `cli.deploy` with code `10000` is almost always an OAuth credential.
 
-Create the token at **My Profile → API Tokens → Create Token → Create Custom Token**.
-The stack touches:
+Use an **API token** or the **Global API Key**.
 
-| Scope   | Permission                    | Why                                       |
-| ------- | ----------------------------- | ----------------------------------------- |
-| Account | Workers Scripts: Edit         | the Worker, its subdomain and custom domain |
-| Account | D1: Edit                      | whitelist / held / log database           |
-| Account | Workers R2 Storage: Edit      | held `.eml` bucket and its lifecycle rule |
-| Account | Email Routing Addresses: Edit | register the forward destination          |
-| Account | Account Settings: Read        | resolve the account                       |
-| Zone    | Email Routing Rules: Edit     | enable routing, point the catch-all at the Worker |
-| Zone    | Zone: Read                    | resolve the zone from `MAIL_RELAY_DOMAIN` |
-| Zone    | DNS: Edit                     | the Worker's custom-domain record         |
+The blunt option, and the one this project has actually been deployed with, is a token
+carrying every permission group:
 
-Scope the zone permissions to the zone holding `MAIL_RELAY_DOMAIN`. A Global API Key
-works too and skips the permission list, at the cost of being an all-permissions
-account credential.
+```sh
+alchemy cloudflare create-token --all-permissions
+```
+
+That prints a token value once — pass it to `alchemy login` (choose "API token"), or
+export it as `CLOUDFLARE_API_TOKEN`. Note the command authenticates as *you* to mint
+the token, so it needs a credential already in place; the Global API Key
+(`CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL`) is the usual bootstrap. A token can only
+carry permissions the authenticating user holds, so if it reports "Granted 0
+permission groups" the account role is the problem, not the command.
+
+Dropping `--all-permissions` gives an interactive picker over the live permission-group
+list from Cloudflare.
+
+> **Least privilege is not documented here on purpose.** This project has only ever
+> been deployed with an all-permissions token; no minimal set has been validated
+> against a real deploy, and publishing an unverified list would just send you round
+> the same 401 loop. If you narrow it, the stack touches Workers Scripts, D1, R2,
+> Email Routing (rules *and* addresses), Zone read and DNS edit — but treat that as a
+> starting point to test, not a working answer.
+
+Verify a credential independently of this project with:
+
+```sh
+curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  https://api.cloudflare.com/client/v4/user/tokens/verify
+```
 
 ## Setup
 
@@ -119,6 +135,24 @@ old token is what the Worker accepts and the new one 401s.
 `MAIL_RELAY_DOMAIN` may be a subdomain several levels deep. The zone is derived from its
 last two labels (`xyz.mail.example.com` → `example.com`), and that zone is what Email Routing is
 enabled on.
+
+### When a deploy fails on auth
+
+`~/.alchemy` does not travel between machines, so a second machine needs its own
+`alchemy login` — and taking the default there gives you OAuth, which cannot deploy
+this project (above).
+
+```sh
+alchemy profile show                       # which credential kind is this profile?
+pnpm plan --log-level debug                # names the request that failed
+```
+
+`profile show` reporting `oauth` is the answer. If it reports `apiToken` and the deploy
+still 401s, the debug run prints the failing URL, and the permission it needs follows
+from that path.
+
+`--profile` is a CLI flag and `ALCHEMY_PROFILE` is read from the environment; neither
+can be set in `.env`.
 
 ## The one manual step
 
