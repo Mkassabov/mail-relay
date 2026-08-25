@@ -109,6 +109,13 @@ holds nothing but the Worker.
 | `ADMIN_BEARER_TOKEN`          | deploy, CLI  | Bearer token for the admin HTTP API                                       | `openssl rand -hex 32`        |
 | `WORKER_URL`                  | admin CLI    | Worker URL from the deploy output — not set automatically                 | `https://relay.example.com`   |
 
+`.env` is gitignored, so a fresh clone starts from `.env.example` — the values are not
+in the repo.
+
+`ADMIN_BEARER_TOKEN` is bound into the Worker as a `secret_text` binding **at deploy
+time**. Changing it in `.env` does nothing until you `pnpm deploy` again; until then the
+old token is what the Worker accepts and the new one 401s.
+
 `MAIL_RELAY_DOMAIN` may be a subdomain several levels deep. The zone is derived from its
 last two labels (`xyz.mail.example.com` → `example.com`), and that zone is what Email Routing is
 enabled on.
