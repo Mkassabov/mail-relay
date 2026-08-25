@@ -5,11 +5,19 @@ import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
 import * as HttpApiMiddleware from "effect/unstable/httpapi/HttpApiMiddleware";
 import * as HttpApiSecurity from "effect/unstable/httpapi/HttpApiSecurity";
 
-export class Unauthorized extends Schema.TaggedClass<Unauthorized>()("Unauthorized", {}) {}
+export class Unauthorized extends Schema.TaggedError<Unauthorized>()(
+  "Unauthorized",
+  {},
+  { httpApiStatus: 401 },
+) {}
 
-export class NotFound extends Schema.TaggedClass<NotFound>()("NotFound", {
-  message: Schema.String,
-}) {}
+export class NotFound extends Schema.TaggedError<NotFound>()(
+  "NotFound",
+  {
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
 
 export const security = { bearer: HttpApiSecurity.bearer };
 

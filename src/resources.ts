@@ -1,10 +1,11 @@
 import * as Cloudflare from "alchemy/Cloudflare";
 
-export const DB = Cloudflare.D1Database("DB", {
-  migrationsDir: "./migrations",
+export const DB = Cloudflare.D1.Database("DB", {
+  migrations: "./migrations",
 });
 
-export const HeldEmails = Cloudflare.R2Bucket("HeldEmails", {
+export const HeldEmails = Cloudflare.R2.Bucket("HeldEmails", {
+  forceDestroy: true,
   lifecycleRules: [
     {
       id: "expire-held-emails",
@@ -15,4 +16,4 @@ export const HeldEmails = Cloudflare.R2Bucket("HeldEmails", {
   ],
 });
 
-export const Email = Cloudflare.SendEmail("EMAIL");
+export const Email = Cloudflare.Email.SendEmail("EMAIL");

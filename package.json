@@ -2,30 +2,32 @@
   "name": "mail-relay",
   "private": true,
   "type": "module",
-  "module": "index.ts",
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "admin": "bun run src/admin.ts",
-    "build:cli": "source .env && bun build --compile src/admin.ts --outfile mail-relay --define __WORKER_URL__=\"'$WORKER_URL'\" --define __ADMIN_BEARER_TOKEN__=\"'$ADMIN_BEARER_TOKEN'\""
+    "admin": "node --env-file=.env src/admin.ts",
+    "build:cli": "node --env-file=.env scripts/build-cli.mjs"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0-beta.70",
-    "@effect/platform-node": "4.0.0-beta.70",
-    "alchemy": "https://pkg.ing/alchemy/752abea",
-    "effect": "4.0.0-beta.70"
+    "@effect/platform-node": "4.0.0-rc.110",
+    "alchemy": "^2.0.0-beta.74",
+    "effect": "4.0.0-rc.110"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260522.1",
-    "@types/bun": "latest",
+    "@types/node": "^24.3.0",
     "@typescript/native-preview": "^7.0.0-dev.20260521.1",
+    "esbuild": "^0.25.9",
     "oxfmt": "^0.51.0",
-    "oxlint": "^1.66.0"
-  },
-  "peerDependencies": {
+    "oxlint": "^1.66.0",
+    "postject": "^1.0.0-alpha.6",
     "typescript": "^5"
-  }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.22.0"
 }

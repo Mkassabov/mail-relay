@@ -1,57 +1,68 @@
 # mail-relay
 
-A Cloudflare Worker that receives inbound email on a subdomain and forwards it to a configurable destination, with a per-(sender, alias) whitelist and held-email review flow.
+A Cloudflare Worker that receives inbound email on a domain you own and forwards it to a configurable destination, with a per-(sender, alias) whitelist and held-email review flow.
 
 ## How it works
 
-- Email sent to `<alias>@<MAIL_RELAY_DOMAIN>` is received by the Worker via Cloudflare Email Routing.
-- If the sender is whitelisted for that alias, the email is forwarded immediately to the address derived from `MAIL_RELAY_FORWARD_TEMPLATE`.
-- If not, the raw email is stored in R2 and a review request is created in D1. The email is held for up to 3 days (R2 lifecycle auto-deletes it).
-- An admin can approve (adds sender to whitelist for that alias) or reject the request via the HTTP API.
+- Mail to `<alias>@<MAIL_RELAY_DOMAIN>` is delivered to the Worker by Cloudflare Email Routing.
+- If that sender is already whitelisted for that alias, the Worker sends the message onward using `MAIL_RELAY_FORWARD_TEMPLATE`.
+- Otherwise the raw `.eml` is stored in R2 and a pending request is written to D1. R2 lifecycle deletes held objects after 3 days.
+- An admin approves or rejects via HTTP API or `pnpm admin`. Approve forwards the original message, then adds the sender to the whitelist for that alias.
 
-Whitelists are **per sender per alias** — a sender approved for `foo@<domain>` is not automatically approved for `bar@<domain>`.
+Whitelists are **per sender per alias**. Approval for `foo@<domain>` does not grant `bar@<domain>`.
 
-When a held request is approved, the original email is forwarded to the destination via Cloudflare's `send_email` binding, with `Reply-To` set to the original sender.
+Outbound mail uses Cloudflare’s `send_email` binding. `Reply-To` is the original sender.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) installed
-- A Cloudflare account with the relay domain added as a zone
-- [Cloudflare Email Service](https://developers.cloudflare.com/email-service/) enabled with a verified sending domain
-- [Alchemy CLI](https://v2.alchemy.run/getting-started) (`alchemy` is installed as a project dependency)
+- [Node.js](https://nodejs.org/) 22+
+- [pnpm](https://pnpm.io/) 11+
+- A Cloudflare account
+- The zone for `MAIL_RELAY_DOMAIN` already in that account (Alchemy will not register a domain)
+- That zone using Cloudflare nameservers (Email Routing’s MX/SPF records are written on the zone)
 
-### Email Routing setup
-
-After the first deploy, configure Email Routing in the Cloudflare dashboard:
-
-1. Go to **Email > Email Routing > Settings** for your zone. This will prompt you to add the required MX and verification DNS records automatically.
-2. Under **Email > Email Routing > Routing rules**, edit the default catch-all rule to forward to the deployed Worker.
-
-> **Why not automated?** Cloudflare only allows one catch-all rule per zone and the default cannot be deleted. The alchemy `EmailRule` provider always tries to create a new rule on first deploy, which conflicts. See [alchemy-effect#413](https://github.com/alchemy-run/alchemy-effect/issues/413).
+Alchemy is a project dependency (`alchemy@2.0.0-beta.74`). You do not need a global install.
 
 ## Setup
 
 ```sh
-bun install
+pnpm install
 cp .env.example .env
-# Edit .env with your values
+# Edit .env — at least MAIL_RELAY_DOMAIN, MAIL_RELAY_FORWARD_TEMPLATE, ADMIN_BEARER_TOKEN
+pnpm alchemy login          # once per machine / profile
+pnpm alchemy deploy         # add --profile personal if that is your saved profile
 ```
+
+The first deploy:
+
+1. Enables Email Routing on the zone (`example.com` for `relay.example.com`)
+2. Creates the D1 database (and applies `migrations/`)
+3. Creates the R2 bucket
+4. Deploys the Worker (custom domain = `MAIL_RELAY_DOMAIN`)
+5. Points the zone’s catch-all rule at that Worker
+
+Then finish the human steps in [After deploy](#after-deploy). A single `alchemy deploy` cannot complete those.
 
 ### Environment variables
 
-| Variable                      | Description                                                                        | Example                           |
-| ----------------------------- | ---------------------------------------------------------------------------------- | --------------------------------- |
-| `MAIL_RELAY_DOMAIN`           | Full domain (including subdomain) that receives email                              | `relay.example.com`               |
-| `MAIL_RELAY_FORWARD_TEMPLATE` | Forwarding address template — `${alias}` is replaced with the recipient local part | `user+${alias}@example.com`       |
-| `ADMIN_BEARER_TOKEN`          | Bearer token for the admin HTTP API                                                | (generate a secure random string) |
+| Variable                      | Required for | Description                                                               | Example                     |
+| ----------------------------- | ------------ | ------------------------------------------------------------------------- | --------------------------- |
+| `MAIL_RELAY_DOMAIN`           | deploy       | Hostname that receives mail (and the Worker’s custom domain)              | `relay.example.com`         |
+| `MAIL_RELAY_FORWARD_TEMPLATE` | deploy       | Destination template — `${alias}` is replaced with the inbound local part | `user+${alias}@example.com` |
+| `ADMIN_BEARER_TOKEN`          | deploy, CLI  | Bearer token for the admin HTTP API                                       | a long random string        |
+| `WORKER_URL`                  | admin CLI    | Worker URL from the deploy output — not set automatically                 | `https://relay.example.com` |
 
-## Deploy
+## After deploy
 
-```sh
-bun alchemy deploy --profile personal
-```
+Do these before expecting mail to flow:
 
-First run will prompt for Cloudflare OAuth or API token login.
+1. **Copy `WORKER_URL`.** Stack output `url` → `.env` as `WORKER_URL` if you use the admin CLI.
+2. **Verify the send destination.** Cloudflare only delivers `send_email` to a destination that has been verified on the account. Register it under **Email → Email Routing → Destination addresses** (or `Cloudflare.Email.Address` in a stack) and **click the link Cloudflare emails**. Until that happens, forwards fail with `SendEmailError`.
+   - A static template (`you@example.com`) needs that one address verified.
+   - A plus-address template (`you+${alias}@example.com`) needs each exact address you send to verified, not only `you@example.com`.
+3. **Confirm MX.** If the zone was already on Cloudflare DNS, enabling routing should have added MX/SPF. If nameservers are not Cloudflare, inbound mail will not arrive until they are.
+
+Catch-all is managed as code now (`Cloudflare.Email.CatchAll`). You no longer need to edit the default catch-all in the dashboard. Cloudflare still allows only **one catch-all per zone** — if that zone already receives other mail, this Worker will take it. Use a dedicated zone if you need isolation.
 
 ## Admin API
 
@@ -60,18 +71,15 @@ All endpoints require `Authorization: Bearer <ADMIN_BEARER_TOKEN>`.
 ### Whitelist
 
 ```sh
-# List all whitelist entries
-curl <WORKER_URL>/whitelist -H "Authorization: Bearer $TOKEN"
+curl "$WORKER_URL/whitelist" -H "Authorization: Bearer $ADMIN_BEARER_TOKEN"
 
-# Add a sender to the whitelist for an alias
-curl -X POST <WORKER_URL>/whitelist \
-  -H "Authorization: Bearer $TOKEN" \
+curl -X POST "$WORKER_URL/whitelist" \
+  -H "Authorization: Bearer $ADMIN_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"sender": "alice@example.com", "alias": "support"}'
 
-# Remove a whitelist entry
-curl -X DELETE <WORKER_URL>/whitelist \
-  -H "Authorization: Bearer $TOKEN" \
+curl -X DELETE "$WORKER_URL/whitelist" \
+  -H "Authorization: Bearer $ADMIN_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"sender": "alice@example.com", "alias": "support"}'
 ```
@@ -79,53 +87,74 @@ curl -X DELETE <WORKER_URL>/whitelist \
 ### Held requests
 
 ```sh
-# List all requests (pending, approved, rejected)
-curl <WORKER_URL>/requests -H "Authorization: Bearer $TOKEN"
+curl "$WORKER_URL/requests" -H "Authorization: Bearer $ADMIN_BEARER_TOKEN"
 
-# Approve a request (adds sender+alias to whitelist)
-curl -X POST <WORKER_URL>/requests/<ID>/approve \
-  -H "Authorization: Bearer $TOKEN"
+curl -X POST "$WORKER_URL/requests/<ID>/approve" \
+  -H "Authorization: Bearer $ADMIN_BEARER_TOKEN"
 
-# Reject a request
-curl -X POST <WORKER_URL>/requests/<ID>/reject \
-  -H "Authorization: Bearer $TOKEN"
+curl -X POST "$WORKER_URL/requests/<ID>/reject" \
+  -H "Authorization: Bearer $ADMIN_BEARER_TOKEN"
 ```
 
-## Resources provisioned
+### Sent log
 
-| Resource      | Logical ID     | Purpose                                      |
-| ------------- | -------------- | -------------------------------------------- |
-| D1 Database   | `DB`           | Whitelist + held request metadata            |
-| R2 Bucket     | `HeldEmails`   | Raw `.eml` storage (3-day lifecycle)         |
-| Email Routing | `EmailRouting` | Enables inbound email on the zone            |
-| SendEmail     | `EMAIL`        | Outbound email binding for approved forwards |
-| Worker        | `Worker`       | Email handler + admin API                    |
+```sh
+curl "$WORKER_URL/log" -H "Authorization: Bearer $ADMIN_BEARER_TOKEN"
+```
 
 ## Admin CLI
 
-Reads `WORKER_URL` and `ADMIN_BEARER_TOKEN` from `.env`.
+Reads `WORKER_URL` and `ADMIN_BEARER_TOKEN` from `.env`. Node 22+ runs the TypeScript entry directly.
 
 ```sh
-bun run admin whitelist list
-bun run admin whitelist add alice@example.com support
-bun run admin whitelist remove alice@example.com support
+pnpm admin whitelist list
+pnpm admin whitelist add alice@example.com support
+pnpm admin whitelist remove alice@example.com support
 
-bun run admin requests list
-bun run admin requests approve <id>
-bun run admin requests reject <id>
-bun run admin requests review   # interactive review of pending requests
+pnpm admin requests list
+pnpm admin requests approve <id>
+pnpm admin requests reject <id>
+pnpm admin requests review   # interactive review of pending requests
+
+pnpm admin log
 ```
+
+To bake those env values into a standalone binary (Node [SEA](https://nodejs.org/api/single-executable-applications.html), no Bun compile):
+
+```sh
+pnpm build:cli
+./dist/mail-relay whitelist list
+```
+
+## Resources
+
+| Resource      | Logical ID     | Purpose                                    |
+| ------------- | -------------- | ------------------------------------------ |
+| D1 Database   | `DB`           | Whitelist, held requests, sent-mail log    |
+| R2 Bucket     | `HeldEmails`   | Raw `.eml` storage (3-day lifecycle)       |
+| Email Routing | `EmailRouting` | Enables inbound mail on the zone           |
+| Catch-all     | `CatchAll`     | Hands unmatched inbound mail to the Worker |
+| SendEmail     | `EMAIL`        | Outbound `send_email` binding              |
+| Worker        | `Worker`       | Email handler + admin API                  |
 
 ## Development
 
 ```sh
-bun run typecheck   # tsgo --noEmit
-bun run lint        # oxlint
-bun run fmt         # oxfmt
+pnpm typecheck   # tsgo --noEmit
+pnpm lint        # oxlint
+pnpm fmt         # oxfmt
+```
+
+Local Worker loop (cloud resources still deploy; email send is simulated unless you opt the binding into live):
+
+```sh
+pnpm alchemy dev
 ```
 
 ## Tear down
 
 ```sh
-bun alchemy destroy --profile personal
+pnpm alchemy destroy
 ```
+
+Held R2 objects are emptied on destroy (`forceDestroy`). The zone itself is not deleted.

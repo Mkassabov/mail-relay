@@ -1,9 +1,11 @@
-# dependencies (bun install)
+# dependencies
 node_modules
 
 # output
 out
 dist
+mail-relay
+mail-relay.exe
 *.tgz
 
 # code coverage

@@ -12,14 +12,20 @@ export default Alchemy.Stack(
     state: Cloudflare.state(),
   },
   Effect.gen(function* () {
-    const domain = yield* Effect.orDie(Config.string("MAIL_RELAY_DOMAIN"));
+    const domain = yield* Config.string("MAIL_RELAY_DOMAIN");
     const { rootZone } = parseDomain(domain);
 
-    yield* Cloudflare.EmailRouting("EmailRouting", {
+    yield* Cloudflare.Email.Routing("EmailRouting", {
       zone: rootZone,
     });
 
     const worker = yield* Worker;
+
+    yield* Cloudflare.Email.CatchAll("CatchAll", {
+      zone: rootZone,
+      name: "MailRelay worker",
+      actions: [{ type: "worker", value: [worker.workerName] }],
+    });
 
     return {
       url: worker.url,

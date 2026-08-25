@@ -1,9 +1,10 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import * as Etag from "effect/unstable/http/Etag";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
@@ -12,6 +13,16 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { AuthMiddleware, MailRelayApi, NotFound, Unauthorized } from "./api.ts";
 import { resolveForwardAddress } from "./config.ts";
 import { DB, Email, HeldEmails } from "./resources.ts";
+
+const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
+  platform: "web",
+  compression: {
+    algorithms: new Set<HttpPlatform.CompressionAlgorithm>(),
+    compressResponse: (response) => Effect.succeed(response),
+  },
+  fileResponse: () => Effect.die("HttpPlatform.fileResponse not supported"),
+  fileWebResponse: () => Effect.die("HttpPlatform.fileWebResponse not supported"),
+});
 
 function extractBody(raw: string): { text?: string; html?: string } {
   const headerEnd = raw.indexOf("\r\n\r\n");
@@ -45,32 +56,25 @@ function extractBody(raw: string): { text?: string; html?: string } {
 export default Cloudflare.Worker(
   "Worker",
   {
-    main: import.meta.path,
+    main: import.meta.url,
     domain: process.env.MAIL_RELAY_DOMAIN,
-    env: {
-      test: "string",
-    },
   },
   Effect.gen(function* () {
-    const db = yield* Cloudflare.D1Connection.bind(DB);
-    const bucket = yield* Cloudflare.R2Bucket.bind(HeldEmails);
-    const email = yield* Cloudflare.SendEmail.bind(Email);
-    const domain = yield* Alchemy.Variable("MAIL_RELAY_DOMAIN");
-    const forwardTemplate = yield* Alchemy.Variable("MAIL_RELAY_FORWARD_TEMPLATE");
-    const adminToken = yield* Alchemy.Secret("ADMIN_BEARER_TOKEN");
-
-    // --- admin API ---
+    const db = yield* Cloudflare.D1.QueryDatabase(DB);
+    const bucket = yield* Cloudflare.R2.ReadWriteBucket(HeldEmails);
+    const email = yield* Cloudflare.Email.Send(yield* Email);
+    const domain = yield* Config.string("MAIL_RELAY_DOMAIN");
+    const forwardTemplate = yield* Config.string("MAIL_RELAY_FORWARD_TEMPLATE");
+    const adminToken = yield* Config.redacted("ADMIN_BEARER_TOKEN");
 
     const authMiddleware = Layer.succeed(AuthMiddleware, {
-      bearer: (httpEffect: any, { credential }: any) =>
-        Effect.gen(function* () {
-          const token = yield* adminToken;
-          if (Redacted.value(token) !== Redacted.value(credential)) {
-            return yield* Effect.fail(new (Unauthorized as any)());
-          }
-          return yield* httpEffect;
-        }),
-    } as any);
+      bearer: (httpEffect, { credential }) => {
+        if (Redacted.value(adminToken) !== Redacted.value(credential)) {
+          return Effect.fail(new Unauthorized());
+        }
+        return httpEffect;
+      },
+    });
 
     const adminGroup = HttpApiBuilder.group(MailRelayApi, "Admin", (handlers) =>
       handlers
@@ -125,31 +129,28 @@ export default Cloudflare.Worker(
               }>();
 
             if (!row) {
-              return yield* Effect.fail(
-                new NotFound({
-                  message: "Request not found or already processed",
-                }),
-              );
+              return yield* new NotFound({
+                message: "Request not found or already processed",
+              });
             }
 
-            const tmpl = yield* forwardTemplate;
-            const recipientDomain = (yield* domain).toLowerCase();
-            const forwardTo = resolveForwardAddress(tmpl, row.alias);
+            const recipientDomain = domain.toLowerCase();
+            const forwardTo = resolveForwardAddress(forwardTemplate, row.alias);
 
-            const r2Obj = yield* Effect.orDie(bucket.get(row.r2_key));
+            const r2Obj = yield* bucket.get(row.r2_key).pipe(Effect.orDie);
             const body = r2Obj
-              ? extractBody(yield* Effect.orDie(r2Obj.text()))
+              ? extractBody(yield* r2Obj.text().pipe(Effect.orDie))
               : { text: "(original message body unavailable)" };
 
-            yield* Effect.orDie(
-              email.send({
+            yield* email
+              .send({
                 from: { name: `MR ${row.sender}`, email: `${row.alias}@${recipientDomain}` },
                 to: forwardTo,
                 subject: row.subject ?? "(no subject)",
                 replyTo: row.sender,
                 ...body,
-              }),
-            );
+              })
+              .pipe(Effect.orDie);
 
             yield* db.batch([
               db
@@ -166,7 +167,7 @@ export default Cloudflare.Worker(
                 .bind(crypto.randomUUID(), row.sender, row.alias, forwardTo, row.subject),
             ]);
 
-            yield* Effect.orDie(bucket.delete(row.r2_key));
+            yield* bucket.delete(row.r2_key).pipe(Effect.orDie);
 
             return {
               ok: true as const,
@@ -199,11 +200,9 @@ export default Cloudflare.Worker(
               .first<{ r2_key: string }>();
 
             if (!row) {
-              return yield* Effect.fail(
-                new NotFound({
-                  message: "Request not found or already processed",
-                }),
-              );
+              return yield* new NotFound({
+                message: "Request not found or already processed",
+              });
             }
 
             yield* db
@@ -211,7 +210,7 @@ export default Cloudflare.Worker(
               .bind(params.id)
               .run();
 
-            yield* Effect.orDie(bucket.delete(row.r2_key));
+            yield* bucket.delete(row.r2_key).pipe(Effect.orDie);
 
             return { ok: true as const };
           }),
@@ -219,15 +218,16 @@ export default Cloudflare.Worker(
     );
 
     return {
-      fetch: HttpApiBuilder.layer(MailRelayApi).pipe(
-        Layer.provide(adminGroup),
-        Layer.provide(authMiddleware),
-        Layer.provide([HttpPlatform.layer, Etag.layer]),
-        HttpRouter.toHttpEffect,
+      fetch: yield* HttpRouter.toHttpEffect(
+        HttpApiBuilder.layer(MailRelayApi).pipe(
+          Layer.provide(adminGroup),
+          Layer.provide(authMiddleware),
+          Layer.provide([Etag.layer, HttpPlatformStub, Path.layer]),
+        ),
       ),
       email: (message: ForwardableEmailMessage) =>
         Effect.gen(function* () {
-          const recipientDomain = (yield* domain).toLowerCase();
+          const recipientDomain = domain.toLowerCase();
           const to = message.to.toLowerCase();
 
           if (!to.endsWith(`@${recipientDomain}`)) {
@@ -244,9 +244,7 @@ export default Cloudflare.Worker(
             .first();
 
           if (whitelisted) {
-            const tmpl = yield* forwardTemplate;
-            const forwardTo = resolveForwardAddress(tmpl, alias);
-            const recipientDomain = (yield* domain).toLowerCase();
+            const forwardTo = resolveForwardAddress(forwardTemplate, alias);
 
             const raw = yield* Effect.promise(() => new Response(message.raw).text());
             const body = extractBody(raw);
@@ -256,15 +254,18 @@ export default Cloudflare.Worker(
             const senderName = nameMatch?.[1]?.trim() ?? sender;
             const subject = message.headers.get("subject") ?? "(no subject)";
 
-            yield* Effect.orDie(
-              email.send({
-                from: { name: `MR ${senderName} (${sender})`, email: `${alias}@${recipientDomain}` },
+            yield* email
+              .send({
+                from: {
+                  name: `MR ${senderName} (${sender})`,
+                  email: `${alias}@${recipientDomain}`,
+                },
                 to: forwardTo,
                 subject,
                 replyTo: sender,
                 ...body,
-              }),
-            );
+              })
+              .pipe(Effect.orDie);
 
             yield* db
               .prepare(
@@ -282,7 +283,7 @@ export default Cloudflare.Worker(
           const subject = message.headers.get("subject") ?? "(no subject)";
 
           const raw = yield* Effect.promise(() => new Response(message.raw).arrayBuffer());
-          yield* bucket.put(r2Key, raw);
+          yield* bucket.put(r2Key, raw).pipe(Effect.orDie);
 
           yield* db
             .prepare(
@@ -294,9 +295,9 @@ export default Cloudflare.Worker(
         }).pipe(Effect.orDie),
     };
   }).pipe(
-    Effect.provide(Cloudflare.D1ConnectionLive),
-    Effect.provide(Cloudflare.R2BucketBindingLive),
-    Effect.provide(Cloudflare.SendEmailBindingLive),
+    Effect.provide(Cloudflare.D1.QueryDatabaseBinding),
+    Effect.provide(Cloudflare.R2.ReadWriteBucketBinding),
+    Effect.provide(Cloudflare.Email.SendBinding),
     Effect.orDie,
   ),
 );

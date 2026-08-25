@@ -1,18 +1,22 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
-declare const __WORKER_URL__: string;
-declare const __ADMIN_BEARER_TOKEN__: string;
-process.env.WORKER_URL ??= __WORKER_URL__;
-process.env.ADMIN_BEARER_TOKEN ??= __ADMIN_BEARER_TOKEN__;
+declare const __WORKER_URL__: string | undefined;
+declare const __ADMIN_BEARER_TOKEN__: string | undefined;
+if (typeof __WORKER_URL__ === "string" && __WORKER_URL__.length > 0) {
+  process.env.WORKER_URL ??= __WORKER_URL__;
+}
+if (typeof __ADMIN_BEARER_TOKEN__ === "string" && __ADMIN_BEARER_TOKEN__.length > 0) {
+  process.env.ADMIN_BEARER_TOKEN ??= __ADMIN_BEARER_TOKEN__;
+}
 
+import * as Clank from "alchemy/Util/Clank";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Clank from "alchemy/Util/Clank";
-import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import { FetchHttpClient } from "effect/unstable/http";
+import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 import { MailRelayApi } from "./api.ts";
 
 const env = Effect.orDie(
@@ -145,7 +149,8 @@ const log = {
   }),
 };
 
-const USAGE = `Usage: bun run admin <command>
+const USAGE = `Usage: pnpm admin <command>
+       ./dist/mail-relay <command>
 
 Commands:
   whitelist list                     List all whitelist entries
