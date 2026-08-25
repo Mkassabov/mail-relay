@@ -11,7 +11,11 @@ import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { AuthMiddleware, MailRelayApi, NotFound, Unauthorized } from "./api.ts";
-import { resolveForwardAddress } from "./config.ts";
+import {
+  baseForwardAddress,
+  parseDomain,
+  resolveForwardAddress,
+} from "./config.ts";
 import {
   decodeWords,
   headerValue,
@@ -48,12 +52,18 @@ function senderLabel(from: string, name?: string): string {
   return display && display.toLowerCase() !== from ? `MR ${display} (${from})` : `MR ${from}`;
 }
 
-export default Cloudflare.Worker(
+export default class Worker extends Cloudflare.Worker<Worker>()(
   "Worker",
-  {
-    main: import.meta.url,
-    domain: process.env.MAIL_RELAY_DOMAIN,
-  },
+  // Props are resolved as an Effect so `domain` comes from Config rather
+  // than a module-scope `process.env` read, which evaluates before the CLI
+  // has loaded .env and silently yielded `undefined` (leaving the custom
+  // domain attached to whichever Worker last claimed it).
+  Effect.gen(function* () {
+    return {
+      main: import.meta.url,
+      domain: yield* Config.string("MAIL_RELAY_DOMAIN"),
+    };
+  }),
   Effect.gen(function* () {
     const db = yield* Cloudflare.D1.QueryDatabase(DB);
     const bucket = yield* Cloudflare.R2.ReadWriteBucket(HeldEmails);
@@ -61,6 +71,17 @@ export default Cloudflare.Worker(
     const domain = yield* Config.string("MAIL_RELAY_DOMAIN");
     const forwardTemplate = yield* Config.string("MAIL_RELAY_FORWARD_TEMPLATE");
     const adminToken = yield* Config.redacted("ADMIN_BEARER_TOKEN");
+
+    // Register the forward destination on the account as code, rather than
+    // adding it by hand in the dashboard. Cloudflare will not deliver
+    // `send_email` to an address it has not verified; declaring it here
+    // makes the deploy send the verification mail. Resolved from the
+    // template via Config (not module-level `process.env`) so it is
+    // populated by the time the stack is evaluated.
+    const destination = baseForwardAddress(forwardTemplate);
+    if (destination) {
+      yield* Cloudflare.Email.Address("Destination", { email: destination });
+    }
 
     const authMiddleware = Layer.succeed(AuthMiddleware, {
       bearer: (httpEffect, { credential }) => {
@@ -222,6 +243,84 @@ export default Cloudflare.Worker(
         ),
     );
 
+    // Inbound mail. One call wires both halves: the runtime `email`
+    // listener, and — at deploy time — the sibling Email.Routing toggle plus
+    // the zone's Email.CatchAll pointing back at this Worker. That is why
+    // alchemy.run.ts no longer declares either by hand.
+    yield* Cloudflare.email({ zone: parseDomain(domain).rootZone }).subscribe(
+      (message) =>
+          Effect.gen(function* () {
+            const recipientDomain = domain.toLowerCase();
+            const to = message.to.toLowerCase();
+
+            if (!to.endsWith(`@${recipientDomain}`)) {
+              return yield* message.setReject("Unknown recipient domain");
+            }
+
+            const alias = to.slice(0, to.indexOf("@"));
+            const sender = message.from.toLowerCase();
+
+            const whitelisted = yield* db
+              .prepare("SELECT 1 FROM whitelist WHERE sender = ?1 AND alias = ?2")
+              .bind(sender, alias)
+              .first();
+
+            if (whitelisted) {
+              const forwardTo = resolveForwardAddress(forwardTemplate, alias);
+
+              // Read the message as bytes, not text: charset and transfer
+              // encodings are per-part, so decoding up front corrupts anything
+              // that isn't plain UTF-8.
+              const raw = yield* Effect.promise(() => new Response(message.body).arrayBuffer());
+              const parsed = parseMessage(raw);
+
+              const originalFrom = parseAddress(message.headers.get("from") ?? sender);
+              const subject = forwardSubject(message.headers.get("subject"));
+
+              yield* email
+                .send({
+                  from: {
+                    name: senderLabel(sender, originalFrom.name),
+                    email: `${alias}@${recipientDomain}`,
+                  },
+                  to: forwardTo,
+                  subject,
+                  replyTo: sender,
+                  // Carry the sender's thread over, so a relayed conversation
+                  // stays one conversation on both ends.
+                  headers: threadingHeaders(parsed.headers),
+                  ...toForwardPayload(parsed),
+                })
+                .pipe(Effect.orDie);
+
+              yield* db
+                .prepare(
+                  `INSERT INTO email_log (id, sender, alias, recipient, subject, trigger)
+                   VALUES (?1, ?2, ?3, ?4, ?5, 'forward')`,
+                )
+                .bind(crypto.randomUUID(), sender, alias, forwardTo, subject)
+                .run();
+
+              return;
+            }
+
+            const id = crypto.randomUUID();
+            const r2Key = `held/${id}.eml`;
+            const subject = forwardSubject(message.headers.get("subject"));
+
+            const raw = yield* Effect.promise(() => new Response(message.body).arrayBuffer());
+            yield* bucket.put(r2Key, raw).pipe(Effect.orDie);
+
+            yield* db
+              .prepare(
+                `INSERT INTO held_requests (id, sender, alias, subject, r2_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5)`,
+              )
+              .bind(id, sender, alias, subject, r2Key)
+              .run();
+        }),
+    );
+
     return {
       fetch: yield* HttpRouter.toHttpEffect(
         HttpApiBuilder.layer(MailRelayApi).pipe(
@@ -230,83 +329,12 @@ export default Cloudflare.Worker(
           Layer.provide([Etag.layer, HttpPlatformStub, Path.layer]),
         ),
       ),
-      email: (message: ForwardableEmailMessage) =>
-        Effect.gen(function* () {
-          const recipientDomain = domain.toLowerCase();
-          const to = message.to.toLowerCase();
-
-          if (!to.endsWith(`@${recipientDomain}`)) {
-            message.setReject("Unknown recipient domain");
-            return;
-          }
-
-          const alias = to.slice(0, to.indexOf("@"));
-          const sender = message.from.toLowerCase();
-
-          const whitelisted = yield* db
-            .prepare("SELECT 1 FROM whitelist WHERE sender = ?1 AND alias = ?2")
-            .bind(sender, alias)
-            .first();
-
-          if (whitelisted) {
-            const forwardTo = resolveForwardAddress(forwardTemplate, alias);
-
-            // Read the message as bytes, not text: charset and transfer
-            // encodings are per-part, so decoding up front corrupts anything
-            // that isn't plain UTF-8.
-            const raw = yield* Effect.promise(() => new Response(message.raw).arrayBuffer());
-            const parsed = parseMessage(raw);
-
-            const originalFrom = parseAddress(message.headers.get("from") ?? sender);
-            const subject = forwardSubject(message.headers.get("subject"));
-
-            yield* email
-              .send({
-                from: {
-                  name: senderLabel(sender, originalFrom.name),
-                  email: `${alias}@${recipientDomain}`,
-                },
-                to: forwardTo,
-                subject,
-                replyTo: sender,
-                // Carry the sender's thread over, so a relayed conversation
-                // stays one conversation on both ends.
-                headers: threadingHeaders(parsed.headers),
-                ...toForwardPayload(parsed),
-              })
-              .pipe(Effect.orDie);
-
-            yield* db
-              .prepare(
-                `INSERT INTO email_log (id, sender, alias, recipient, subject, trigger)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'forward')`,
-              )
-              .bind(crypto.randomUUID(), sender, alias, forwardTo, subject)
-              .run();
-
-            return;
-          }
-
-          const id = crypto.randomUUID();
-          const r2Key = `held/${id}.eml`;
-          const subject = forwardSubject(message.headers.get("subject"));
-
-          const raw = yield* Effect.promise(() => new Response(message.raw).arrayBuffer());
-          yield* bucket.put(r2Key, raw).pipe(Effect.orDie);
-
-          yield* db
-            .prepare(
-              `INSERT INTO held_requests (id, sender, alias, subject, r2_key)
-               VALUES (?1, ?2, ?3, ?4, ?5)`,
-            )
-            .bind(id, sender, alias, subject, r2Key)
-            .run();
-        }).pipe(Effect.orDie),
     };
   }).pipe(
     Effect.provide(Cloudflare.D1.QueryDatabaseBinding),
     Effect.provide(Cloudflare.R2.ReadWriteBucketBinding),
     Effect.provide(Cloudflare.Email.SendBinding),
+    Effect.provide(Cloudflare.EmailEventSourceLive),
     Effect.orDie,
   ),
-);
+) {}

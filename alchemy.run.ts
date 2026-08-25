@@ -1,8 +1,6 @@
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
-import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
-import { parseDomain } from "./src/config.ts";
 import Worker from "./src/worker.ts";
 
 export default Alchemy.Stack(
@@ -11,21 +9,11 @@ export default Alchemy.Stack(
     providers: Cloudflare.providers(),
     state: Cloudflare.state(),
   },
+  // Email.Routing and the zone's Email.CatchAll are no longer declared here:
+  // the `Cloudflare.email({ zone }).subscribe(...)` call inside the Worker
+  // yields both as siblings of the Worker at deploy time.
   Effect.gen(function* () {
-    const domain = yield* Config.string("MAIL_RELAY_DOMAIN");
-    const { rootZone } = parseDomain(domain);
-
-    yield* Cloudflare.Email.Routing("EmailRouting", {
-      zone: rootZone,
-    });
-
     const worker = yield* Worker;
-
-    yield* Cloudflare.Email.CatchAll("CatchAll", {
-      zone: rootZone,
-      name: "MailRelay worker",
-      actions: [{ type: "worker", value: [worker.workerName] }],
-    });
 
     return {
       url: worker.url,
