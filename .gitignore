@@ -37,3 +37,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # alchemy state
 .alchemy
+
+# Local D1 snapshots taken before destructive migrations
+backup-*.json
