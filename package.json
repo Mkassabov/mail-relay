@@ -10,11 +10,16 @@
     "fmt:check": "oxfmt --check",
     "test": "node --test src/*.test.ts",
     "admin": "node --env-file=.env src/admin.ts",
-    "build:cli": "node --env-file=.env scripts/build-cli.mjs"
+    "build:cli": "node --env-file=.env scripts/build-cli.mjs",
+    "plan": "alchemy plan --stage prod",
+    "deploy": "alchemy deploy --stage prod",
+    "destroy": "alchemy destroy --stage prod",
+    "tail": "alchemy tail --stage prod",
+    "dev": "alchemy dev --stage prod"
   },
   "dependencies": {
     "@effect/platform-node": "4.0.0-rc.111",
-    "alchemy": "link:/home/michaelk/.herdr/worktrees/alchemy/email-stuff/packages/alchemy",
+    "alchemy": "https://pkg.ing/alchemy/dc87a4d",
     "effect": "4.0.0-rc.111"
   },
   "devDependencies": {

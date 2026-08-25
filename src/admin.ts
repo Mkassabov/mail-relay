@@ -180,7 +180,10 @@ const main = (() => {
   }
   if (cmd === "log") return log.list;
   console.log(USAGE);
-  process.exit(1);
+  // `return` so the fall-through is typed `never`; without it the IIFE
+  // infers `... | undefined` and `main.pipe(...)` stops type-checking
+  // against alchemy's published .d.ts surface.
+  return process.exit(1);
 })();
 
 Effect.runPromise(main.pipe(Effect.orDie, Effect.provide(ClientLive)) as Effect.Effect<void>).catch(
