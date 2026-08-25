@@ -135,9 +135,18 @@ catch-all, the custom domain and its certificate are all provisioned by the depl
 ## Verifying a deployment
 
 ```sh
+# bash / zsh
 export TOKEN=$(grep '^ADMIN_BEARER_TOKEN=' .env | cut -d= -f2)
 export URL=$(grep '^WORKER_URL=' .env | cut -d= -f2-)
+```
 
+```fish
+# fish
+set -x TOKEN (grep '^ADMIN_BEARER_TOKEN=' .env | cut -d= -f2)
+set -x URL (grep '^WORKER_URL=' .env | cut -d= -f2-)
+```
+
+```sh
 curl -s -H "Authorization: Bearer $TOKEN" "$URL/whitelist" | jq length
 curl -s -o /dev/null -w '%{http_code}\n' "$URL/whitelist"    # 401 — auth is enforced
 ```
